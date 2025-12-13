@@ -7,23 +7,27 @@ import "./EnumerableSet.sol";
 contract MultiSig {
     using EnumerableSet for EnumerableSet.UintSet;
 
-    address[] public owners;
-    uint256 public threshold;
+    enum ExecutionStatus {
+        Pending,
+        Executed,
+        Canceled
+    }
 
     struct Proposal {
         address target;
         uint256 value;
         bytes data;
-        bool executed;
+        ExecutionStatus executionStatus;
         uint256 confirmations;
         mapping(address => bool) confirmedBy;
     }
 
-    Proposal[] public proposals;
-
-    EnumerableSet.UintSet private _undoneProposals;
-
+    address[] public owners;
     mapping(address => bool) public isOwner;
+    uint256 public threshold;
+
+    Proposal[] public proposals;
+    EnumerableSet.UintSet private _undoneProposals;
 
     event Received(address sender, uint256 amount);
 
@@ -36,6 +40,8 @@ contract MultiSig {
 
     event ProposalConfirmed(uint256 proposalId, address confirmer);
 
+    event ProposalCancelled(uint256 proposalId);
+
     event ProposalExecuted(uint256 proposalId);
 
     event ProposalExecutionLog(
@@ -45,6 +51,11 @@ contract MultiSig {
         bytes data,
         bool success
     );
+
+    modifier onlySelf() {
+        require(msg.sender == address(this));
+        _;
+    }
 
     modifier onlyOwner() {
         require(isOwner[msg.sender], "The caller is not the owner");
@@ -56,8 +67,11 @@ contract MultiSig {
         _;
     }
 
-    modifier notExecuted(uint256 proposalId) {
-        require(!proposals[proposalId].executed, "Proposal already executed");
+    modifier isPending(uint256 proposalId) {
+        require(
+            proposals[proposalId].executionStatus == ExecutionStatus.Pending,
+            "Proposal status is not Pending"
+        );
         _;
     }
 
@@ -97,7 +111,7 @@ contract MultiSig {
         proposal.target = target;
         proposal.value = value;
         proposal.data = data;
-        proposal.executed = false;
+        proposal.executionStatus = ExecutionStatus.Pending;
         proposal.confirmations = 0;
 
         _undoneProposals.add(proposalId);
@@ -107,7 +121,7 @@ contract MultiSig {
 
     function confirmProposal(
         uint256 proposalId
-    ) external onlyOwner proposalExists(proposalId) notExecuted(proposalId) {
+    ) external onlyOwner proposalExists(proposalId) isPending(proposalId) {
         Proposal storage proposal = proposals[proposalId];
 
         require(
@@ -119,15 +133,22 @@ contract MultiSig {
         proposal.confirmations++;
 
         emit ProposalConfirmed(proposalId, msg.sender);
+    }
 
-        if (proposal.confirmations >= threshold) {
-            executeProposal(proposalId);
-        }
+    function cancelProposal(
+        uint256 proposalId
+    ) external onlySelf proposalExists(proposalId) isPending(proposalId) {
+        Proposal storage proposal = proposals[proposalId];
+        proposal.executionStatus = ExecutionStatus.Canceled;
+
+        _undoneProposals.remove(proposalId);
+
+        emit ProposalCancelled(proposalId);
     }
 
     function executeProposal(
         uint256 proposalId
-    ) internal proposalExists(proposalId) notExecuted(proposalId) {
+    ) external onlyOwner proposalExists(proposalId) isPending(proposalId) {
         Proposal storage proposal = proposals[proposalId];
 
         require(
@@ -135,7 +156,7 @@ contract MultiSig {
             "Insufficient confirmations"
         );
 
-        proposal.executed = true;
+        proposal.executionStatus = ExecutionStatus.Executed;
 
         (bool success, ) = proposal.target.call{value: proposal.value}(
             proposal.data
@@ -156,6 +177,10 @@ contract MultiSig {
         emit ProposalExecuted(proposalId);
     }
 
+    function getOwnersLength() public view returns (uint256) {
+        return owners.length;
+    }
+
     function getProposalsLength() public view returns (uint256) {
         return proposals.length;
     }
@@ -170,13 +195,13 @@ contract MultiSig {
 
     function getProposal(
         uint256 proposalId
-    ) external view returns (address, uint256, bytes memory, bool, uint256) {
+    ) external view returns (address, uint256, bytes memory, uint256, uint256) {
         Proposal storage proposal = proposals[proposalId];
         return (
             proposal.target,
             proposal.value,
             proposal.data,
-            proposal.executed,
+            uint256(proposal.executionStatus),
             proposal.confirmations
         );
     }
